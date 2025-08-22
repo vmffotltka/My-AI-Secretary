@@ -1,0 +1,9 @@
+# 파이썬 캐시 파일
+__pycache__/
+
+# 개인 인증 정보 및 토큰 (가장 중요!)
+credentials.json
+token.json
+
+# 개인 데이터베이스 파일
+secretary.db
