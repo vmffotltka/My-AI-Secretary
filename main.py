@@ -52,29 +52,20 @@ def init_db():
     """데이터베이스와 테이블이 없으면 새로 생성합니다."""
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
-    # 기존 todos 테이블
-    cur.execute("CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, task TEXT NOT NULL)")
-    
-    # --- 새로운 테이블 추가 ---
-    # 지출 기록 테이블
+    # status 열이 추가된 새로운 todos 테이블
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS todos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT '미완료'
+        )
+    """)
+    # expenses 테이블은 그대로 유지됩니다.
     cur.execute("""
         CREATE TABLE IF NOT EXISTS expenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item TEXT NOT NULL,
-            amount REAL NOT NULL,
-            created_at TEXT NOT NULL
+            id INTEGER PRIMARY KEY, item TEXT NOT NULL, amount REAL NOT NULL, created_at TEXT NOT NULL
         )
     """)
-    # 메모 기록 테이블
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS memos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-    # --- 테이블 추가 끝 ---
-    
     con.commit()
     con.close()
 
@@ -82,6 +73,99 @@ mcp = FastMCP("my-ai-secretary")
 
 
 # --- AI 비서의 '도구(Tool)'들 ---
+# --- main.py에 아래 내용으로 교체 또는 추가하세요 ---
+
+def init_db():
+    """데이터베이스와 테이블이 없으면 새로 생성합니다."""
+    con = sqlite3.connect(DB_FILE)
+    cur = con.cursor()
+    # status 열이 추가된 새로운 todos 테이블
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS todos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT '미완료'
+        )
+    """)
+    # expenses 테이블은 그대로 유지됩니다.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS expenses (
+            id INTEGER PRIMARY KEY, item TEXT NOT NULL, amount REAL NOT NULL, created_at TEXT NOT NULL
+        )
+    """)
+    con.commit()
+    con.close()
+
+# --- 새로운 통합 도구: 작업 관리 ---
+
+@mcp.tool()
+def add_task(content: str) -> str:
+    """새로운 작업을 '미완료' 상태로 추가합니다."""
+    con = sqlite3.connect(DB_FILE)
+    cur = con.cursor()
+    cur.execute("INSERT INTO todos (task) VALUES (?)", (content,))
+    con.commit()
+    con.close()
+    return f"✅ '{content}' 작업을 추가했습니다."
+
+@mcp.tool()
+def show_tasks(status_filter: str = "전체") -> str:
+    """
+    지정된 상태('전체', '미완료', '완료')의 작업 목록을 보여줍니다.
+    
+    :param status_filter: 보여줄 작업의 상태. 기본값은 '전체'입니다.
+    """
+    con = sqlite3.connect(DB_FILE)
+    cur = con.cursor()
+    
+    if status_filter in ["미완료", "완료"]:
+        cur.execute("SELECT id, task, status FROM todos WHERE status = ? ORDER BY id", (status_filter,))
+    else:
+        cur.execute("SELECT id, task, status FROM todos ORDER BY id")
+        
+    tasks = cur.fetchall()
+    con.close()
+    
+    if not tasks:
+        return "관리할 작업이 없습니다."
+    
+    # 상태에 따라 아이콘을 붙여줍니다.
+    def get_icon(status):
+        return "✅" if status == "완료" else "☑️"
+
+    formatted_list = "\n".join(f"{get_icon(status)} {task_id}. {task}" for task_id, task, status in tasks)
+    return f"'{status_filter}' 작업 목록입니다:\n{formatted_list}"
+
+@mcp.tool()
+def complete_task(task_id: int) -> str:
+    """ID에 해당하는 작업을 '완료' 상태로 변경합니다."""
+    con = sqlite3.connect(DB_FILE)
+    cur = con.cursor()
+    cur.execute("UPDATE todos SET status = '완료' WHERE id = ?", (task_id,))
+    
+    if cur.rowcount == 0:
+        con.close()
+        return f"🤔 ID {task_id}번 작업을 찾을 수 없습니다."
+    
+    con.commit()
+    con.close()
+    return f"🎉 {task_id}번 작업을 완료 처리했습니다!"
+
+@mcp.tool()
+def delete_task(task_id: int) -> str:
+    """ID에 해당하는 작업을 삭제합니다."""
+    con = sqlite3.connect(DB_FILE)
+    cur = con.cursor()
+    cur.execute("DELETE FROM todos WHERE id = ?", (task_id,))
+    
+    if cur.rowcount == 0:
+        con.close()
+        return f"🤔 ID {task_id}번 작업을 찾을 수 없습니다."
+        
+    con.commit()
+    con.close()
+    return f"🗑️ {task_id}번 작업을 삭제했습니다."
+
 @mcp.tool()
 def get_daily_briefing() -> str:
     """
@@ -157,16 +241,6 @@ def log_expense(item: str, amount: float) -> str:
     # 숫자에 콤마를 넣어 보기 좋게 표시합니다.
     return f"💸 {amount:,.0f}원 지출('{item}') 내역을 기록했습니다."
 
-@mcp.tool()
-def save_memo(content: str) -> str:
-    """간단한 텍스트 메모를 데이터베이스에 저장합니다."""
-    now = datetime.datetime.now().isoformat()
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-    cur.execute("INSERT INTO memos (content, created_at) VALUES (?, ?)", (content, now))
-    con.commit()
-    con.close()
-    return "✍️ 메모를 저장했습니다."
 
 @mcp.tool()
 def summarize_expenses() -> str:
@@ -287,41 +361,6 @@ def get_current_time() -> str:
     """현재 시간을 알려줍니다."""
     now = datetime.datetime.now()
     return f"지금은 {now.strftime('%Y년 %m월 %d일 %H시 %M분')}입니다."
-
-@mcp.tool()
-def add_todo(item: str) -> str:
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-    cur.execute("INSERT INTO todos (task) VALUES (?)", (item,))
-    con.commit()
-    con.close()
-    return f"✅ '{item}' 항목을 할 일 목록에 추가했습니다."
-
-@mcp.tool()
-def show_todos() -> str:
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-    cur.execute("SELECT task FROM todos")
-    items = [row[0] for row in cur.fetchall()]
-    con.close()
-    if not items: return "현재 할 일 목록이 비어있습니다."
-    formatted_list = "\n".join(f"{i+1}. {item}" for i, item in enumerate(items))
-    return f"현재 할 일 목록입니다:\n{formatted_list}"
-
-@mcp.tool()
-def remove_todo(item: str) -> str:
-    """할 일 목록에서 특정 항목을 삭제합니다."""
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-    cur.execute("DELETE FROM todos WHERE task = ?", (item,))
-    changes = con.total_changes
-    con.commit()
-    con.close()
-    
-    if changes > 0:
-        return f"🗑️ '{item}' 항목을 할 일 목록에서 삭제했습니다."
-    else:
-        return f"🤔 '{item}' 항목을 찾을 수 없습니다."
 
 # --- 도구 정의 끝 ---
 
