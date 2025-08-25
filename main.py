@@ -1,36 +1,221 @@
 import sqlite3
-# pathlib 라이브러리를 추가로 불러옵니다.
 import pathlib
-from fastmcp import FastMCP
 import datetime
+import os.path
+import re
+import datetime
+from datetime import timedelta
+from dateutil.parser import parse
+import requests # requests 라이브러리 추가
+from deep_translator import GoogleTranslator
 
-# --- DB 설정 ---
-# 현재 파일(main.py)이 있는 폴더의 절대 경로를 찾습니다.
+from fastmcp import FastMCP
+
+# --- Google Calendar API 관련 import ---
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+# --- 설정 ---
+# 1. 여기에 발급받은 API 키를 붙여넣으세요!
+OPENWEATHER_API_KEY = "92f4fdaaac2e0c24b24c3f7257a31599"
+NEWS_API_KEY = "13ad299046fd4e67b327f07046f764e1"
+SCOPES = ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/calendar.readonly"]
 SCRIPT_DIR = pathlib.Path(__file__).parent
-# 그 폴더 안에 'secretary.db' 파일을 생성하도록 경로를 지정합니다.
 DB_FILE = SCRIPT_DIR / "secretary.db"
+# --- 설정 끝 ---
+
+def get_google_creds():
+    """구글 API 인증 정보를 가져오는 함수"""
+    creds = None
+    token_path = SCRIPT_DIR / "token.json"
+    creds_path = SCRIPT_DIR / "credentials.json"
+    if os.path.exists(token_path):
+        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(token_path, "w") as token:
+            token.write(creds.to_json())
+    return creds
 
 def init_db():
-    """데이터베이스와 테이블이 없으면 새로 생성합니다."""
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS todos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task TEXT NOT NULL
-        )
-    """)
+    cur.execute("CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT NOT NULL)")
     con.commit()
     con.close()
-# --- DB 설정 끝 ---
 
-
-# FastMCP 서버를 준비합니다.
 mcp = FastMCP("my-ai-secretary")
 
 
 # --- AI 비서의 '도구(Tool)'들 ---
+@mcp.tool()
+def get_daily_briefing() -> str:
+    """
+    오늘의 첫 캘린더 일정, 현재 날씨, 최신 뉴스 헤드라인을 종합하여 브리핑 보고서를 생성합니다.
+    """
+    briefing_parts = []
 
+    # 1. 구글 캘린더에서 오늘 첫 일정 가져오기
+    try:
+        creds = get_google_creds()
+        service = build("calendar", "v3", credentials=creds)
+        now = datetime.datetime.utcnow().isoformat() + "Z"  # 'Z' indicates UTC time
+        events_result = service.events().list(
+            calendarId="primary", timeMin=now, maxResults=1, singleEvents=True, orderBy="startTime"
+        ).execute()
+        events = events_result.get("items", [])
+        if not events:
+            briefing_parts.append("오늘 예정된 일정이 없습니다.")
+        else:
+            event = events[0]
+            start = event["start"].get("dateTime", event["start"].get("date"))
+            start_time = parse(start).strftime('%p %I:%M')
+            briefing_parts.append(f"오늘의 첫 일정은 '{event['summary']}'(이)가 {start_time}에 있습니다.")
+    except Exception as e:
+        briefing_parts.append(f"캘린더 정보를 가져오는 데 실패했습니다: {e}")
+
+    # 2. OpenWeatherMap에서 현재 날씨 가져오기
+    try:
+        weather_url = f"http://api.openweathermap.org/data/2.5/weather?q=Seoul&appid={OPENWEATHER_API_KEY}&units=metric&lang=kr"
+        response = requests.get(weather_url)
+        weather_data = response.json()
+        description = weather_data['weather'][0]['description']
+        temp = weather_data['main']['temp']
+        briefing_parts.append(f"현재 서울 날씨는 '{description}'이며, 기온은 {temp}°C입니다.")
+    except Exception as e:
+        briefing_parts.append("날씨 정보를 가져오는 데 실패했습니다.")
+
+    # 3. NewsAPI에서 최신 뉴스 헤드라인 가져오기
+    try:
+        # 국가를 'us'로 변경하여 영문 뉴스를 가져옵니다.
+        news_url = f"https://newsapi.org/v2/top-headlines?country=us&apiKey={NEWS_API_KEY}"
+        response = requests.get(news_url)
+        news_data = response.json()
+        articles = news_data.get("articles", [])
+        
+        # --- 번역 코드 시작 ---
+        headlines_ko = []
+        translator = GoogleTranslator(source='en', target='ko')
+        for article in articles[:3]: # 상위 3개만
+            translated_title = translator.translate(article['title'])
+            headlines_ko.append(f"- {translated_title}")
+        # --- 번역 코드 끝 ---
+
+        if headlines_ko:
+            briefing_parts.append("주요 IT 뉴스:\n" + "\n".join(headlines_ko))
+        else:
+            briefing_parts.append("최신 뉴스를 가져올 수 없습니다.")
+    except Exception as e:
+        briefing_parts.append(f"뉴스 정보를 가져오는 데 실패했습니다: {e}")
+        
+    # 4. 모든 정보를 합쳐서 최종 보고서 초안을 만듦
+    return "\n\n".join(briefing_parts)
+
+
+@mcp.tool()
+def add_calendar_event(summary: str, time_info: str) -> str:
+    """
+    설명과 시간 정보를 바탕으로 구글 캘린더에 이벤트를 추가합니다.
+    
+    :param summary: 이벤트의 제목 (예: "팀 회의")
+    :param time_info: 이벤트의 시간 정보 (예: "내일 오후 3시", "오늘 저녁 7시 30분")
+    """
+    
+    def parse_korean_time(time_info: str) -> datetime.datetime:
+        """한국어 자연어 시간을 datetime으로 변환"""
+        now = datetime.datetime.now()
+        
+        # 날짜 파싱
+        if "내일" in time_info:
+            target_date = now + timedelta(days=1)
+        elif "모레" in time_info:
+            target_date = now + timedelta(days=2)
+        elif "오늘" in time_info:
+            target_date = now
+        else:
+            target_date = now
+        
+        # 시간 추출
+        hour_match = re.search(r'(\d+)시', time_info)
+        minute_match = re.search(r'(\d+)분', time_info)
+        
+        if not hour_match:
+            raise ValueError("시간을 찾을 수 없습니다")
+        
+        hour = int(hour_match.group(1))
+        minute = int(minute_match.group(1)) if minute_match else 0
+        
+        # 오전/오후 처리
+        if "오후" in time_info and hour != 12:
+            hour += 12
+        elif "오전" in time_info and hour == 12:
+            hour = 0
+        elif "저녁" in time_info and hour < 6:
+            hour += 12
+        elif "밤" in time_info and hour < 12:
+            hour += 12
+        
+        return target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    
+    creds = None
+    token_path = SCRIPT_DIR / "token.json"
+    creds_path = SCRIPT_DIR / "credentials.json"
+
+    # token.json 파일이 있으면, 저장된 인증 정보를 불러옵니다.
+    if os.path.exists(token_path):
+        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+
+    # 인증 정보가 없거나 유효하지 않으면, 새로 로그인합니다.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
+            creds = flow.run_local_server(port=0)
+        # 새로운 인증 정보를 token.json에 저장합니다.
+        with open(token_path, "w") as token:
+            token.write(creds.to_json())
+
+    try:
+        service = build("calendar", "v3", credentials=creds)
+        
+        # 한국어 자연어 시간 정보를 datetime 객체로 변환
+        start_time = parse_korean_time(time_info)
+        
+        # 기본 이벤트 기간을 1시간으로 설정 (시간이나 분 정보로 조정 가능)
+        duration_hours = 1
+        if "시간" in time_info:
+            duration_match = re.search(r'(\d+)시간', time_info)
+            if duration_match:
+                duration_hours = int(duration_match.group(1))
+        
+        end_time = start_time + datetime.timedelta(hours=duration_hours)
+
+        event = {
+            "summary": summary,
+            "start": {"dateTime": start_time.isoformat(), "timeZone": "Asia/Seoul"},
+            "end": {"dateTime": end_time.isoformat(), "timeZone": "Asia/Seoul"},
+        }
+
+        event = service.events().insert(calendarId="primary", body=event).execute()
+        return f"🗓️ 구글 캘린더에 '{event.get('summary')}' 일정을 추가했습니다. ({start_time.strftime('%Y-%m-%d %H:%M')} - {end_time.strftime('%H:%M')})"
+
+    except HttpError as error:
+        return f"구글 캘린더 연동 중 오류가 발생했습니다: {error}"
+    except ValueError as e:
+        return f"시간 정보('{time_info}')를 이해하지 못했어요. '내일 오후 3시'처럼 좀 더 명확하게 말씀해주세요. 오류: {e}"
+    except Exception as e:
+        return f"예상치 못한 오류가 발생했습니다: {e}"
+
+
+# --- 기존 도구들은 그대로 유지 ---
 @mcp.tool()
 def get_current_time() -> str:
     """현재 시간을 알려줍니다."""
@@ -39,7 +224,6 @@ def get_current_time() -> str:
 
 @mcp.tool()
 def add_todo(item: str) -> str:
-    """할 일 목록에 새로운 항목을 추가합니다."""
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
     cur.execute("INSERT INTO todos (task) VALUES (?)", (item,))
@@ -49,16 +233,12 @@ def add_todo(item: str) -> str:
 
 @mcp.tool()
 def show_todos() -> str:
-    """현재 저장된 모든 할 일 목록을 보여줍니다."""
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
     cur.execute("SELECT task FROM todos")
     items = [row[0] for row in cur.fetchall()]
     con.close()
-    
-    if not items:
-        return "현재 할 일 목록이 비어있습니다."
-    
+    if not items: return "현재 할 일 목록이 비어있습니다."
     formatted_list = "\n".join(f"{i+1}. {item}" for i, item in enumerate(items))
     return f"현재 할 일 목록입니다:\n{formatted_list}"
 
@@ -79,8 +259,7 @@ def remove_todo(item: str) -> str:
 
 # --- 도구 정의 끝 ---
 
-
-# 서버를 직접 실행(STDIO) 방식으로 실행합니다.
+# --- 서버 실행 ---
 if __name__ == "__main__":
     init_db()
     mcp.run(transport='stdio')
