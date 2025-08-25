@@ -8,6 +8,10 @@ from datetime import timedelta
 from dateutil.parser import parse
 import requests # requests 라이브러리 추가
 from deep_translator import GoogleTranslator
+from dotenv import load_dotenv
+
+# .env 파일에서 환경 변수를 불러옵니다.
+load_dotenv()
 
 from fastmcp import FastMCP
 
@@ -20,8 +24,8 @@ from googleapiclient.errors import HttpError
 
 # --- 설정 ---
 # 1. 여기에 발급받은 API 키를 붙여넣으세요!
-OPENWEATHER_API_KEY = "92f4fdaaac2e0c24b24c3f7257a31599"
-NEWS_API_KEY = "13ad299046fd4e67b327f07046f764e1"
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 SCOPES = ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/calendar.readonly"]
 SCRIPT_DIR = pathlib.Path(__file__).parent
 DB_FILE = SCRIPT_DIR / "secretary.db"
