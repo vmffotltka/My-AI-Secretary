@@ -9,6 +9,8 @@ from dateutil.parser import parse
 import requests # requests 라이브러리 추가
 from deep_translator import GoogleTranslator
 from dotenv import load_dotenv
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.formatters import TextFormatter
 
 # .env 파일에서 환경 변수를 불러옵니다.
 load_dotenv()
@@ -354,14 +356,100 @@ def add_calendar_event(summary: str, time_info: str) -> str:
     except Exception as e:
         return f"예상치 못한 오류가 발생했습니다: {e}"
 
-
-# --- 기존 도구들은 그대로 유지 ---
 @mcp.tool()
 def get_current_time() -> str:
     """현재 시간을 알려줍니다."""
     now = datetime.datetime.now()
     return f"지금은 {now.strftime('%Y년 %m월 %d일 %H시 %M분')}입니다."
 
+@mcp.tool()
+def summarize_youtube_video(video_url: str) -> str:
+    """
+    주어진 YouTube 영상 URL의 전체 스크립트를 추출하여 텍스트로 반환합니다.
+    실제 요약은 이 결과를 받은 Claude가 수행합니다.
+    """
+    try:
+        import re
+        from youtube_transcript_api import YouTubeTranscriptApi
+        
+        # 다양한 YouTube URL 형태에서 비디오 ID 추출
+        def extract_video_id(url):
+            # 정규표현식을 사용해 다양한 YouTube URL 형태 지원
+            patterns = [
+                r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|m\.youtube\.com\/watch\?v=)([^&\n?#]+)',
+                r'youtube\.com\/shorts\/([^&\n?#]+)'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, url)
+                if match:
+                    return match.group(1)
+            
+            raise ValueError("유효하지 않은 YouTube URL입니다.")
+        
+        video_id = extract_video_id(video_url)
+        
+        # YouTubeTranscriptApi 인스턴스 생성
+        ytt_api = YouTubeTranscriptApi()
+        
+        try:
+            # 먼저 사용 가능한 자막 목록 확인
+            transcript_list = ytt_api.list(video_id)
+            
+            # 사용 가능한 언어들 로깅 (디버깅용)
+            available_languages = []
+            for transcript in transcript_list:
+                available_languages.append({
+                    'language': transcript.language,
+                    'language_code': transcript.language_code,
+                    'is_generated': transcript.is_generated
+                })
+            print(f"사용 가능한 자막: {available_languages}")
+            
+        except Exception as e:
+            return f"자막 목록을 가져올 수 없습니다: {e}"
+        
+        # 한국어 우선, 그 다음 영어로 자막 찾기
+        transcript = None
+        try:
+            # 한국어 자막 먼저 시도
+            transcript = transcript_list.find_transcript(['ko', 'kr'])
+        except:
+            try:
+                # 영어 자막 시도
+                transcript = transcript_list.find_transcript(['en'])
+            except:
+                try:
+                    # 첫 번째 사용 가능한 자막 사용
+                    transcript = transcript_list._transcripts[0] if transcript_list._transcripts else None
+                except:
+                    pass
+        
+        if transcript is None:
+            return f"사용 가능한 자막을 찾을 수 없습니다. 사용 가능한 언어: {[t.language_code for t in transcript_list]}"
+        
+        # 자막 데이터 가져오기
+        try:
+            fetched_transcript = transcript.fetch()
+            
+            # 텍스트 추출 (새 API에서는 .text 속성 사용)
+            full_transcript = " ".join([snippet.text.strip() for snippet in fetched_transcript if snippet.text.strip()])
+            
+            # 너무 긴 텍스트는 자르기 (토큰 제한 고려)
+            if len(full_transcript) > 10000:
+                full_transcript = full_transcript[:10000] + "... (텍스트가 너무 길어 일부만 표시됩니다)"
+            
+            # Claude에게 요약을 요청하기 위해 전체 스크립트를 반환
+            return f"아래는 영상의 전체 스크립트입니다 (언어: {transcript.language}). 이 내용을 바탕으로 사용자에게 핵심 내용을 3~5문장으로 요약해주세요:\n\n{full_transcript}"
+            
+        except Exception as e:
+            return f"자막 데이터를 가져오는 데 실패했습니다: {e}"
+
+    except ValueError as ve:
+        return str(ve)
+    except Exception as e:
+        return f"스크립트를 가져오는 데 실패했습니다. 자막이 없는 영상이거나 접근할 수 없는 영상일 수 있습니다. 오류: {type(e).__name__}: {e}"
+    
 # --- 도구 정의 끝 ---
 
 # --- 서버 실행 ---
