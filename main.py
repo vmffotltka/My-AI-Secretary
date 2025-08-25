@@ -49,9 +49,32 @@ def get_google_creds():
     return creds
 
 def init_db():
+    """데이터베이스와 테이블이 없으면 새로 생성합니다."""
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
-    cur.execute("CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT NOT NULL)")
+    # 기존 todos 테이블
+    cur.execute("CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, task TEXT NOT NULL)")
+    
+    # --- 새로운 테이블 추가 ---
+    # 지출 기록 테이블
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS expenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item TEXT NOT NULL,
+            amount REAL NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    # 메모 기록 테이블
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS memos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    # --- 테이블 추가 끝 ---
+    
     con.commit()
     con.close()
 
@@ -122,6 +145,45 @@ def get_daily_briefing() -> str:
     # 4. 모든 정보를 합쳐서 최종 보고서 초안을 만듦
     return "\n\n".join(briefing_parts)
 
+@mcp.tool()
+def log_expense(item: str, amount: float) -> str:
+    """지출 항목과 금액을 데이터베이스에 기록합니다."""
+    now = datetime.datetime.now().isoformat()
+    con = sqlite3.connect(DB_FILE)
+    cur = con.cursor()
+    cur.execute("INSERT INTO expenses (item, amount, created_at) VALUES (?, ?, ?)", (item, amount, now))
+    con.commit()
+    con.close()
+    # 숫자에 콤마를 넣어 보기 좋게 표시합니다.
+    return f"💸 {amount:,.0f}원 지출('{item}') 내역을 기록했습니다."
+
+@mcp.tool()
+def save_memo(content: str) -> str:
+    """간단한 텍스트 메모를 데이터베이스에 저장합니다."""
+    now = datetime.datetime.now().isoformat()
+    con = sqlite3.connect(DB_FILE)
+    cur = con.cursor()
+    cur.execute("INSERT INTO memos (content, created_at) VALUES (?, ?)", (content, now))
+    con.commit()
+    con.close()
+    return "✍️ 메모를 저장했습니다."
+
+@mcp.tool()
+def summarize_expenses() -> str:
+    """오늘 하루 동안의 총 지출을 요약해서 알려줍니다."""
+    # 오늘의 시작 시간을 구합니다.
+    today_start = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    con = sqlite3.connect(DB_FILE)
+    cur = con.cursor()
+    # 오늘 기록된 지출 내역의 합계를 구합니다.
+    cur.execute("SELECT SUM(amount) FROM expenses WHERE created_at >= ?", (today_start,))
+    total = cur.fetchone()[0] # fetchone()은 (결과,) 형태의 튜플을 반환하므로 [0]으로 값만 추출
+    con.close()
+    
+    if total is None:
+        return "오늘 기록된 지출이 없습니다."
+    
+    return f"오늘의 총 지출은 {total:,.0f}원입니다."
 
 @mcp.tool()
 def add_calendar_event(summary: str, time_info: str) -> str:
