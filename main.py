@@ -77,27 +77,6 @@ mcp = FastMCP("my-ai-secretary")
 # --- AI 비서의 '도구(Tool)'들 ---
 # --- main.py에 아래 내용으로 교체 또는 추가하세요 ---
 
-def init_db():
-    """데이터베이스와 테이블이 없으면 새로 생성합니다."""
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-    # status 열이 추가된 새로운 todos 테이블
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS todos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT '미완료'
-        )
-    """)
-    # expenses 테이블은 그대로 유지됩니다.
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS expenses (
-            id INTEGER PRIMARY KEY, item TEXT NOT NULL, amount REAL NOT NULL, created_at TEXT NOT NULL
-        )
-    """)
-    con.commit()
-    con.close()
-
 # --- 새로운 통합 도구: 작업 관리 ---
 
 @mcp.tool()
